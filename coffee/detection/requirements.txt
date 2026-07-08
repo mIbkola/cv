@@ -1,3 +1,4 @@
+# Детекция объектов + работа с камерой
 ultralytics>=8.2
 opencv-python
 numpy
@@ -7,3 +8,7 @@ matplotlib
 tqdm
 rich
 click
+
+# Распознавание Олега (по лицу)
+face_recognition
+# или insightface (как альтернатива)

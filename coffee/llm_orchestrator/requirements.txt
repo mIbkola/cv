@@ -1,10 +1,17 @@
-openai
+# Локальный LLM (для разбора команд и адаптации)
+vllm
+transformers
+torch
+
+# Схемы данных и конечный автомат
 pydantic>=2
 transitions
+
+# Утилиты
 pyyaml
 tqdm
 rich
 click
-# Optional for local LLM:
-# vllm
-# transformers
+
+# Транспорт между модулями
+pyzmq

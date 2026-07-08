@@ -1,19 +1,19 @@
-# Core
+# Core — ядро
 torch>=2.1
 torchaudio>=2.1
 numpy<2.0
 soundfile
 librosa
 
-# TTS
+# TTS — синтез речи
 TTS  # Coqui XTTS v2
-# alternatives: f5-tts
+# альтернатива: f5-tts
 
-# VAD + ASR for dataset prep
+# VAD (нарезка по тишине) + ASR (распознавание речи для датасета)
 openai-whisper
 silero-vad
 
-# Utils
+# Утилиты
 tqdm
 rich
 click

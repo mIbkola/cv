@@ -1,15 +1,15 @@
-# Embeddings + vector DB
+# Эмбеддинги + векторная БД
 sentence-transformers>=2.7
 qdrant-client>=1.10
 
-# ASR (optional, for voice input)
+# ASR (опционально, для голосового ввода)
 openai-whisper
 
-# LLM (optional, for intent + adaptation)
-openai          # if using GPT-4o-mini API
-# or vllm for local Qwen2.5-7B
+# LLM (опционально, для разбора интента и адаптации)
+openai         # если GPT-4o-mini через API
+# или vllm для локального Qwen2.5-7B
 
-# Utils
+# Утилиты
 tqdm
 rich
 click
