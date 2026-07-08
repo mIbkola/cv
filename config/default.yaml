@@ -1,0 +1,44 @@
+# Конфигурация проекта Unitree G1 EDU Ultimate D
+# Файл загружается через common.config.load_config()
+# Можно переопределить путь через переменную окружения G1_CONFIG.
+
+transport:
+  zmq_context: 1
+  endpoints:
+    voice_command: tcp://*:5551      # pub: ASR → orchestrator (VoiceCommand)
+    voice_speak: tcp://*:5552         # pub: orchestrator/agent → TTS (text)
+    coffee_state: tcp://*:5553        # pub: state machine → monitor
+    coffee_tool: tcp://*:5554         # req/rep: tools → mock/real hardware
+    cv_detection: tcp://*:5555        # pub: detector → orchestrator (Detection3D)
+    cv_face: tcp://*:5556             # pub: face_id → orchestrator (FaceMatch)
+
+qdrant:
+  url: http://localhost:6333
+  collection: jokes_1986
+
+vllm:
+  url: http://localhost:8000/v1
+  model: Qwen/Qwen2.5-7B-Instruct
+
+tts:
+  base_model: xtts_v2
+  checkpoint: ./checkpoints/burunov.pt
+  sample_rate: 22050
+  language: ru
+
+cv:
+  cup_model: ./coffee/detection/weights/best.pt
+  cup_confidence: 0.5
+  face_reference: ./data/oleg_face.jpg
+  face_tolerance: 0.6
+
+robot:
+  max_speed: 2.0           # м/с, максимальная скорость G1
+  carry_speed: 0.6         # м/с, скорость с грузом (кофе)
+  approach_distance: 0.5   # м, дистанция остановки перед стаканом
+  handover_distance: 0.7   # м, дистанция передачи Олегу
+  grasp_force_min: 30      # г, мин. порог силы хвата
+  grasp_force_max: 80      # г, макс. порог силы хвата
+  anti_crush_force: 200    # г, мгновенный разжим
+  deformation_force: 150   # г, порог деформации стакана
+  handover_release_force: 20  # г, стакан принят
