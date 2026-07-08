@@ -4,9 +4,10 @@
 1. Голосовая команда «расскажи анекдот 86-го» (mock ASR → VoiceCommand).
 2. Извлечение интента: intent="joke", topic, year.
 3. RAG retrieve:
-   - Если Qdrant запущен — реальный поиск через voice/rag/retrieve.py.
-   - Иначе — fallback на локальный корпус (voice/data/jokes_corpus.jsonl)
-     с наивным поиском по ключевым словам.
+   - Если Qdrant + sentence-transformers доступны — реальный поиск через
+     voice/rag/retrieve.py (субпроцесс, --json).
+   - Иначе — лёгкий TF-IDF поиск через voice/rag/retrieve_light.py
+     (субпроцесс, --json) по локальному корпусу 150+ анекдотов.
 4. TTS: если есть checkpoint Бурунова — реальный синтез через voice/tts/infer.py,
    иначе mock TTS (печать текста + публикация в voice.speak).
 
@@ -14,7 +15,7 @@
 
     python integration/demo_joke.py
     python integration/demo_joke.py --query "расскажи анекдот про штирлица"
-    python integration/demo_joke.py --use-qdrant   # реальный RAG
+    python integration/demo_joke.py --use-qdrant   # реальный RAG (Qdrant + ST)
     python integration/demo_joke.py --use-tts      # реальный TTS (если есть ckpt)
 """
 
@@ -53,6 +54,7 @@ from common.transport import (
 DEFAULT_QUERY = "расскажи анекдот 86-го"
 JOKES_CORPUS_PATH = Path(__file__).resolve().parent.parent / "voice" / "data" / "jokes_corpus.jsonl"
 RETRIEVE_SCRIPT = Path(__file__).resolve().parent.parent / "voice" / "rag" / "retrieve.py"
+RETRIEVE_LIGHT_SCRIPT = Path(__file__).resolve().parent.parent / "voice" / "rag" / "retrieve_light.py"
 TTS_INFER_SCRIPT = Path(__file__).resolve().parent.parent / "voice" / "tts" / "infer.py"
 
 QDRANT_HEALTH_TIMEOUT_S = 1.5
@@ -149,9 +151,54 @@ def rag_retrieve_via_qdrant(query: str, top_k: int = 3) -> list[dict[str, Any]]:
     return []
 
 
-def rag_retrieve_fallback(query: str, top_k: int = 3) -> list[dict[str, Any]]:
-    """Fallback: наивный поиск по корпусу анекдотов без Qdrant.
+def rag_retrieve_via_light(query: str, top_k: int = 3,
+                            topic: str | None = None,
+                            year: int | None = None) -> list[dict[str, Any]]:
+    """Лёгкий RAG-поиск через voice/rag/retrieve_light.py (subprocess, --json).
 
+    TF-IDF на sklearn + nltk Snowball русский стемминг. Не требует
+    sentence-transformers / torch / Qdrant.
+
+    Возвращает список словарей с ключами id, text, topic, year, score.
+    """
+    if not RETRIEVE_LIGHT_SCRIPT.exists():
+        log.warning(f"retrieve_light.py не найден: {RETRIEVE_LIGHT_SCRIPT}")
+        return []
+    cmd = [
+        sys.executable, str(RETRIEVE_LIGHT_SCRIPT),
+        "--query", query,
+        "--top-k", str(top_k),
+        "--corpus", str(JOKES_CORPUS_PATH),
+        "--json",
+    ]
+    if topic:
+        cmd += ["--topic", topic]
+    if year is not None:
+        cmd += ["--year", str(year)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log.error("retrieve_light.py таймаут")
+        return []
+    if proc.returncode != 0:
+        log.error(f"retrieve_light.py упал: {proc.stderr[:300]}")
+        return []
+    out = proc.stdout.strip()
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict):
+            return data.get("results", [])
+        if isinstance(data, list):
+            return data
+    except json.JSONDecodeError as exc:
+        log.error(f"retrieve_light.py: не удалось распарсить JSON: {exc}")
+    return []
+
+
+def rag_retrieve_fallback(query: str, top_k: int = 3) -> list[dict[str, Any]]:
+    """Старый наивный fallback: keyword-scoring по корпусу.
+
+    Оставлен как последний рубеж, если даже retrieve_light.py недоступен.
     Считает совпадения ключевых слов запроса в тексте/теме анекдота.
     """
     if not JOKES_CORPUS_PATH.exists():
@@ -285,25 +332,52 @@ def run_demo(
             f"[bold green]Шаг 2: RAG retrieve (top_k={top_k})[/bold green]",
             border_style="green",
         ))
-        # Принятие решения: если Qdrant жив — реальный, иначе fallback
+        # Принятие решения: 3 уровня приоритета.
+        #   1) Qdrant + sentence-transformers (через retrieve.py) — если
+        #      пользователь явно просит (--use-qdrant) И Qdrant жив.
+        #   2) Лёгкий TF-IDF (через retrieve_light.py) — основной fallback,
+        #      не требует torch / sentence-transformers / Qdrant.
+        #   3) Наивный keyword-search по корпусу — последний рубеж, если
+        #      даже retrieve_light.py упал.
+        topic_param = cmd.params.get("topic") or None
+        year_param = cmd.params.get("year") or None
         use_real = use_qdrant and _qdrant_available(cfg.qdrant.url)
         if use_qdrant and not use_real:
             console.print(
                 f"[yellow]  Qdrant недоступен ({cfg.qdrant.url}) — "
-                f"переключаюсь на fallback по корпусу[/yellow]"
+                f"переключаюсь на лёгкий TF-IDF RAG[/yellow]"
             )
+        rag_source = "fallback-keyword"
         if use_real:
-            console.print(f"  [green]Qdrant доступен — реальный RAG[/green]")
+            console.print(f"  [green]Qdrant доступен — реальный RAG (retrieve.py)[/green]")
             hits = rag_retrieve_via_qdrant(query, top_k=top_k)
+            if hits:
+                rag_source = "qdrant"
         else:
-            console.print(f"  [yellow]Локальный fallback по корпусу ({JOKES_CORPUS_PATH.name})[/yellow]")
+            console.print(
+                f"  [cyan]Лёгкий TF-IDF RAG (retrieve_light.py), "
+                f"корпус: {JOKES_CORPUS_PATH.name}[/cyan]"
+            )
+            hits = rag_retrieve_via_light(
+                query, top_k=top_k,
+                topic=topic_param, year=year_param,
+            )
+            if hits:
+                rag_source = "tfidf-light"
+        # Последний рубеж: keyword fallback.
+        if not hits:
+            console.print(
+                "[yellow]  retrieve_light.py ничего не вернул — "
+                "наивный keyword-fallback по корпусу[/yellow]"
+            )
             hits = rag_retrieve_fallback(query, top_k=top_k)
+            if hits:
+                rag_source = "fallback-keyword"
 
         if not hits:
             raise RuntimeError("Не найдено ни одного анекдота")
         report["jokes"] = hits
-        report["steps"].append({"name": "RAG", "ok": True,
-                                "source": "qdrant" if use_real else "fallback"})
+        report["steps"].append({"name": "RAG", "ok": True, "source": rag_source})
         # Печатаем найденные анекдоты
         for i, h in enumerate(hits, 1):
             console.print(

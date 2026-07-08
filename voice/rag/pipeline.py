@@ -5,8 +5,10 @@
     2. Если голосовой — ASR через Whisper.
     3. LLM (vLLM локально, Qwen2.5-7B-Instruct) извлекает интент: {action, topic, year}.
        Если vLLM недоступен — fallback на простую эвристику по ключевым словам.
-    4. RAG retrieve top-5 в Qdrant.
-    5. Rerank через cross-encoder → топ-1.
+    4. RAG retrieve top-5 в Qdrant (через sentence-transformers).
+       Если sentence-transformers или Qdrant недоступны — fallback на лёгкий
+       TF-IDF поиск через retrieve_light.py (sklearn + nltk Snowball).
+    5. Rerank через cross-encoder → топ-1 (только если sentence-transformers).
     6. Опционально LLM-адаптация (например, добавить «А вы слышали...»).
     7. TTS (Бурунов) → wav 22050 Гц моно.
     8. Сохраняет результат в out/.
@@ -56,6 +58,12 @@ DEFAULT_OUT_DIR: str = "./out"
 DEFAULT_TOP_K: int = 5
 QDRANT_TIMEOUT_SEC: float = 5.0
 VLLM_TIMEOUT_SEC: float = 30.0
+
+# Путь к корпусу анекдотов (используется в fallback на retrieve_light.py).
+# Разрешаем относительно расположения этого файла, чтобы работало из любой CWD.
+DEFAULT_CORPUS_PATH: str = str(
+    Path(__file__).resolve().parent.parent / "data" / "jokes_corpus.jsonl"
+)
 
 # Список «знакомых» тем для эвристического fallback'а.
 KNOWN_TOPICS: tuple[str, ...] = (
@@ -111,6 +119,15 @@ def _check_pkg(import_name: str, pip_name: str) -> None:
         console.print(f"[bold red]Ошибка:[/] Python-пакет '{pip_name}' не установлен.")
         console.print(f"   Установите: pip install {pip_name}")
         sys.exit(1)
+
+
+def _try_import(import_name: str) -> bool:
+    """Мягко проверяет наличие пакета. Возвращает True/False, не падает."""
+    try:
+        __import__(import_name)
+        return True
+    except ImportError:
+        return False
 
 
 # --- Шаг 1: ASR ------------------------------------------------------------
@@ -234,6 +251,9 @@ def fallback_intent(user_text: str) -> Intent:
     """Эвристический fallback извлечения интента.
 
     Срабатывает, если vLLM недоступен. Ищет ключевые слова в тексте.
+    Учитывает русскую морфологию: тема «чукча» должна матчится на
+    «чукчу»/«чукче»/«чукчей» и т.п. — используем nltk Snowball stemmer
+    (если доступен), иначе простой substring match.
     """
     text_lower = user_text.lower()
 
@@ -241,12 +261,27 @@ def fallback_intent(user_text: str) -> Intent:
     year_match = re.search(r"\b(19\d{2}|20\d{2})\b", text_lower)
     year = int(year_match.group(1)) if year_match else None
 
-    # Тема: ищем известную тему из списка.
+    # Тема: пытаемся найти известную тему в тексте.
     topic: Optional[str] = None
+    # Сначала — прямой substring (для многословных тем типа «василий иванович’).
     for t in KNOWN_TOPICS:
         if t in text_lower:
             topic = t
             break
+    # Если прямой матч не сработал — пробуем стемминг (для однословных тем).
+    if topic is None:
+        try:
+            from nltk.stem.snowball import RussianStemmer
+            stemmer = RussianStemmer()
+            text_stems = {stemmer.stem(w) for w in re.findall(r"[а-яё]+", text_lower)}
+            for t in KNOWN_TOPICS:
+                # Для многословных тем берём стем первого слова.
+                t_stem = stemmer.stem(t.split()[0])
+                if t_stem in text_stems:
+                    topic = t
+                    break
+        except ImportError:
+            pass  # без nltk — оставляем None
 
     # Action: всегда 'joke' (pipeline пока не поддерживает другие).
     action = "joke"
@@ -401,6 +436,62 @@ def rerank_jokes(
     return sorted(hits, key=lambda h: h.get("rerank_score", 0.0), reverse=True)
 
 
+# --- Шаг 3-alt: Лёгкий RAG через TF-IDF (fallback) -------------------------
+
+def retrieve_jokes_light(
+    intent: Intent,
+    corpus_path: Path,
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    """Лёгкий TF-IDF поиск анекдотов через retrieve_light.py.
+
+    Срабатывает, когда sentence-transformers или Qdrant недоступны.
+    Использует sklearn TfidfVectorizer + cosine_similarity + nltk Snowball
+    (русский стемминг).
+    """
+    # Импортируем retrieve_light как модуль (он рядом).
+    rag_dir = Path(__file__).resolve().parent
+    if str(rag_dir) not in sys.path:
+        sys.path.insert(0, str(rag_dir))
+    try:
+        import retrieve_light as rl  # type: ignore
+    except ImportError as exc:
+        console.print(
+            f"[bold red]Ошибка:[/] не удалось импортировать retrieve_light.py: {exc}"
+        )
+        return []
+
+    if not corpus_path.exists():
+        console.print(f"[bold red]Ошибка:[/] корпус не найден: {corpus_path}")
+        return []
+
+    # Загружаем корпус и строим индекс.
+    records = rl.load_corpus(corpus_path)
+    vectorizer, tfidf_matrix = rl.build_tfidf_index(records)
+
+    # Формируем поисковый запрос из интента.
+    parts: List[str] = []
+    if intent.topic:
+        parts.append(f"анекдот про {intent.topic}")
+    else:
+        parts.append("анекдот")
+    if intent.year:
+        parts.append(f"{intent.year} года")
+    query = " ".join(parts)
+    console.print(f"RAG-light (TF-IDF) поиск: [italic]«{query}»[/]...")
+
+    hits = rl.search_tfidf(
+        query=query,
+        records=records,
+        vectorizer=vectorizer,
+        tfidf_matrix=tfidf_matrix,
+        top_k=top_k,
+        topic_filter=intent.topic,
+        year_filter=intent.year,
+    )
+    return [h.to_dict() for h in hits]
+
+
 # --- Шаг 4: LLM-адаптация текста ------------------------------------------
 
 ADAPT_SYSTEM_PROMPT: str = (
@@ -521,13 +612,21 @@ def run_pipeline(
     use_adapt: bool,
     use_tts: bool,
     language: str,
+    corpus_path: Path = Path(DEFAULT_CORPUS_PATH),
 ) -> PipelineResult:
     """Запускает все шаги пайплайна."""
     console.print("[bold blue]== Полный пайплайн: ASR → Intent → RAG → TTS ==[/]")
 
-    # Проверки зависимостей.
-    _check_pkg("qdrant_client", "qdrant-client")
-    _check_pkg("sentence_transformers", "sentence-transformers")
+    # Проверяем тяжёлые зависимости мягко: если их нет — переключаемся
+    # на лёгкий TF-IDF RAG (retrieve_light.py).
+    heavy_qdrant = _try_import("qdrant_client")
+    heavy_st = _try_import("sentence_transformers")
+    use_light_rag = not (heavy_qdrant and heavy_st)
+    if use_light_rag:
+        console.print(
+            "[yellow]Внимание:[/] qdrant_client/sentence-transformers недоступны — "
+            "RAG работает в лёгком режиме (TF-IDF, retrieve_light.py)."
+        )
     if use_tts:
         _check_pkg("TTS", "TTS")
         _check_pkg("torch", "torch")
@@ -536,6 +635,8 @@ def run_pipeline(
 
     timings: Dict[str, float] = {}
     notes: List[str] = []
+    if use_light_rag:
+        notes.append("RAG: использован лёгкий TF-IDF режим (retrieve_light.py).")
 
     # --- Шаг 1: ASR (если голосовой ввод) ---
     asr_used = False
@@ -563,20 +664,32 @@ def run_pipeline(
     timings["intent"] = time.time() - t0
 
     # --- Шаг 3: RAG retrieve ---
-    console.print(f"Загрузка эмбеддера: {embedding_model}...")
-    from sentence_transformers import SentenceTransformer
-    embedder = SentenceTransformer(embedding_model)
+    if use_light_rag:
+        # Лёгкий путь: TF-IDF без Qdrant/sentence-transformers.
+        t0 = time.time()
+        retrieved = retrieve_jokes_light(
+            intent=intent,
+            corpus_path=corpus_path,
+            top_k=top_k,
+        )
+        timings["rag_retrieve"] = time.time() - t0
+        console.print(f"RAG-light: найдено [bold]{len(retrieved)}[/] анекдотов.")
+    else:
+        # Тяжёлый путь: sentence-transformers + Qdrant.
+        console.print(f"Загрузка эмбеддера: {embedding_model}...")
+        from sentence_transformers import SentenceTransformer
+        embedder = SentenceTransformer(embedding_model)
 
-    t0 = time.time()
-    retrieved = retrieve_jokes(
-        intent=intent,
-        qdrant_url=qdrant_url,
-        collection=collection,
-        embedder=embedder,
-        top_k=top_k,
-    )
-    timings["rag_retrieve"] = time.time() - t0
-    console.print(f"RAG: найдено [bold]{len(retrieved)}[/] анекдотов.")
+        t0 = time.time()
+        retrieved = retrieve_jokes(
+            intent=intent,
+            qdrant_url=qdrant_url,
+            collection=collection,
+            embedder=embedder,
+            top_k=top_k,
+        )
+        timings["rag_retrieve"] = time.time() - t0
+        console.print(f"RAG: найдено [bold]{len(retrieved)}[/] анекдотов.")
 
     if not retrieved:
         console.print(
@@ -586,8 +699,8 @@ def run_pipeline(
         )
         sys.exit(7)
 
-    # --- Шаг 4: Rerank ---
-    if use_rerank:
+    # --- Шаг 4: Rerank (только в тяжёлом режиме) ---
+    if use_rerank and not use_light_rag:
         console.print(f"Реранк через cross-encoder: {reranker_model}...")
         t0 = time.time()
         retrieved = rerank_jokes(
@@ -596,6 +709,8 @@ def run_pipeline(
             reranker_model=reranker_model,
         )
         timings["rerank"] = time.time() - t0
+    elif use_rerank and use_light_rag:
+        notes.append("Rerank пропущен: требует sentence-transformers (недоступен).")
 
     selected = retrieved[0] if retrieved else None
 
@@ -775,6 +890,13 @@ def run_pipeline(
     show_default=True,
     help="Язык синтеза TTS.",
 )
+@click.option(
+    "--corpus", "corpus_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path(DEFAULT_CORPUS_PATH),
+    show_default=True,
+    help="Путь к jokes_corpus.jsonl (для лёгкого TF-IDF RAG, если Qdrant недоступен).",
+)
 def main(
     text: Optional[str],
     audio_path: Optional[Path],
@@ -792,8 +914,13 @@ def main(
     no_adapt: bool,
     no_tts: bool,
     language: str,
+    corpus_path: Path,
 ) -> None:
-    """Полный пайплайн: ввод → ASR → Intent (LLM) → RAG → Rerank → Adapt → TTS."""
+    """Полный пайплайн: ввод → ASR → Intent (LLM) → RAG → Rerank → Adapt → TTS.
+
+    Если sentence-transformers или Qdrant недоступны — RAG автоматически
+    переключается на лёгкий TF-IDF поиск через retrieve_light.py.
+    """
     run_pipeline(
         text=text,
         audio=audio_path,
@@ -811,6 +938,7 @@ def main(
         use_adapt=not no_adapt,
         use_tts=not no_tts,
         language=language,
+        corpus_path=corpus_path,
     )
 
 

@@ -1,34 +1,16 @@
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-env/
-venv/
-.venv/
 .env
-
-# IDE
 .vscode/
 .idea/
 *.swp
 
-# Data
-voice/data/voice_samples/raw/*
-voice/data/voice_samples/processed/*
-!voice/data/voice_samples/raw/.gitkeep
-!voice/data/voice_samples/processed/.gitkeep
-
-# Checkpoints
+# TTS checkpoints
 checkpoints/
 *.pt
 *.onnx
 *.engine
-*.tflite
-
-# Datasets (not committed)
-datasets/
-*.tfrecord
 
 # Logs
 *.log
@@ -38,7 +20,11 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Build
+# Python
 build/
 dist/
 *.egg-info/
+.venv/
+
+# Annotations (keep small, ignore bulk if too big)
+# annotated/
