@@ -1,0 +1,10 @@
+openai
+pydantic>=2
+transitions
+pyyaml
+tqdm
+rich
+click
+# Optional for local LLM:
+# vllm
+# transformers

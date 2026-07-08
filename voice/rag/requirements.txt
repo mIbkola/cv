@@ -1,0 +1,16 @@
+# Embeddings + vector DB
+sentence-transformers>=2.7
+qdrant-client>=1.10
+
+# ASR (optional, for voice input)
+openai-whisper
+
+# LLM (optional, for intent + adaptation)
+openai          # if using GPT-4o-mini API
+# or vllm for local Qwen2.5-7B
+
+# Utils
+tqdm
+rich
+click
+pydantic

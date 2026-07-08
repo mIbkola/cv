@@ -1,0 +1,19 @@
+# Core
+torch>=2.1
+torchaudio>=2.1
+numpy<2.0
+soundfile
+librosa
+
+# TTS
+TTS  # Coqui XTTS v2
+# alternatives: f5-tts
+
+# VAD + ASR for dataset prep
+openai-whisper
+silero-vad
+
+# Utils
+tqdm
+rich
+click

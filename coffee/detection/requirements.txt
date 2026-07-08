@@ -1,0 +1,9 @@
+ultralytics>=8.2
+opencv-python
+numpy
+pillow
+pyrealsense2
+matplotlib
+tqdm
+rich
+click

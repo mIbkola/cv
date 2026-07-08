@@ -1,0 +1,8 @@
+unitree_sdk2py
+pyserial
+numpy
+scipy
+pyyaml
+tqdm
+rich
+click
